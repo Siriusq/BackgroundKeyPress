@@ -11,7 +11,7 @@ mkdir -p "$CONTENTS/Resources"
 rm -f "$CONTENTS/MacOS/BackgroundPressT"
 cp "$ROOT/icon/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/backgroundpresst-module-cache" \
-  swiftc -parse-as-library "$ROOT/main.swift" -o "$CONTENTS/MacOS/$EXECUTABLE"
+  swiftc -parse-as-library "$ROOT"/Sources/BackgroundKeyPress/*.swift -o "$CONTENTS/MacOS/$EXECUTABLE"
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
