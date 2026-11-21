@@ -145,6 +145,9 @@ struct ContentView: View {
                     hotkeyRow(title: "开始", item: controller.startHotkey, id: "start")
                     hotkeyRow(title: "停止", item: controller.stopHotkey, id: "stop")
                     if controller.recordingHotkey != nil { Text("请按下组合键…（至少包含 ⌘、⌥、⌃、⇧ 之一）").font(.caption).foregroundStyle(.orange) }
+                    if let message = controller.hotkeyRegistrationMessage {
+                        Text(message).font(.caption).foregroundStyle(.orange)
+                    }
                 }.padding(.vertical, 4)
             } label: {
                 sectionTitle("快捷键")

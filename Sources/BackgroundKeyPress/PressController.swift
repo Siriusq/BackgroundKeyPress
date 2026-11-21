@@ -21,12 +21,13 @@ final class PressController: ObservableObject {
     }
     @Published var status = "就绪"
     @Published var isRunning = false
-    @Published var startHotkey = Hotkey(keyCode: 49, modifiers: [.command, .option], name: "⌥⌘Space") {
-        didSet { registerSystemHotkeys() }
+    @Published var startHotkey = Hotkey.load(key: "start", fallback: Hotkey(keyCode: 49, modifiers: [.command, .option], name: "⌥⌘Space")) {
+        didSet { startHotkey.save(key: "start"); registerSystemHotkeys() }
     }
-    @Published var stopHotkey = Hotkey(keyCode: 53, modifiers: [.command, .option], name: "⌥⌘Esc") {
-        didSet { registerSystemHotkeys() }
+    @Published var stopHotkey = Hotkey.load(key: "stop", fallback: Hotkey(keyCode: 53, modifiers: [.command, .option], name: "⌥⌘Esc")) {
+        didSet { stopHotkey.save(key: "stop"); registerSystemHotkeys() }
     }
+    @Published private(set) var hotkeyRegistrationMessage: String?
     @Published var recordingHotkey: String?
     @Published var recordingTargetKey = false
     @Published var targetKeyCode = UInt16(UserDefaults.standard.object(forKey: "targetKeyCode") as? Int ?? 0x11) {
@@ -255,12 +256,24 @@ final class PressController: ObservableObject {
     private func registerSystemHotkeys() {
         unregisterSystemHotkeys()
         guard hotKeyHandler != nil else { return }
+        guard startHotkey.keyCode != stopHotkey.keyCode || startHotkey.modifiers != stopHotkey.modifiers else {
+            hotkeyRegistrationMessage = "开始和停止快捷键相同，请为它们设置不同的组合键。"
+            return
+        }
         let startID = EventHotKeyID(signature: OSType(0x42504B59), id: 1)
         let stopID = EventHotKeyID(signature: OSType(0x42504B59), id: 2)
-        RegisterEventHotKey(UInt32(startHotkey.keyCode), carbonModifiers(startHotkey.modifiers), startID,
-                            GetApplicationEventTarget(), 0, &startHotKeyRef)
-        RegisterEventHotKey(UInt32(stopHotkey.keyCode), carbonModifiers(stopHotkey.modifiers), stopID,
-                            GetApplicationEventTarget(), 0, &stopHotKeyRef)
+        let startStatus = RegisterEventHotKey(UInt32(startHotkey.keyCode), carbonModifiers(startHotkey.modifiers), startID,
+                                              GetApplicationEventTarget(), 0, &startHotKeyRef)
+        let stopStatus = RegisterEventHotKey(UInt32(stopHotkey.keyCode), carbonModifiers(stopHotkey.modifiers), stopID,
+                                             GetApplicationEventTarget(), 0, &stopHotKeyRef)
+        if startStatus != noErr || stopStatus != noErr {
+            var unavailable: [String] = []
+            if startStatus != noErr { unavailable.append("开始（\(startHotkey.name)）") }
+            if stopStatus != noErr { unavailable.append("停止（\(stopHotkey.name)）") }
+            hotkeyRegistrationMessage = "快捷键注册失败：\(unavailable.joined(separator: "、"))不可用，可能已被其他应用占用。请更换组合键。"
+        } else {
+            hotkeyRegistrationMessage = nil
+        }
     }
 
     private func unregisterSystemHotkeys() {
@@ -290,7 +303,13 @@ final class PressController: ObservableObject {
             guard !mods.isEmpty else { return }
             let label = KeyNameFormatter.hotkeyName(event)
             let value = Hotkey(keyCode: event.keyCode, modifiers: mods, name: label)
-            if recordingHotkey == "start" { startHotkey = value } else { stopHotkey = value }
+            if recordingHotkey == "start" {
+                startHotkey = value
+                value.save(key: "start")
+            } else {
+                stopHotkey = value
+                value.save(key: "stop")
+            }
             self.recordingHotkey = nil
             return
         }

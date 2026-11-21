@@ -11,6 +11,42 @@ struct Hotkey: Equatable {
     var keyCode: UInt16
     var modifiers: NSEvent.ModifierFlags
     var name: String
+
+    static func load(from defaults: UserDefaults = .standard, key: String, fallback: Hotkey) -> Hotkey {
+        let prefix = "hotkey.\(key)."
+        guard let keyCodeValue = defaults.object(forKey: prefix + "keyCode") as? NSNumber,
+              let modifierValue = defaults.object(forKey: prefix + "modifiers") as? NSNumber else { return fallback }
+        let keyCode = UInt16(truncatingIfNeeded: keyCodeValue.intValue)
+        let storedModifiers = modifierValue.intValue
+        var modifiers: NSEvent.ModifierFlags = []
+        if storedModifiers & 1 != 0 { modifiers.insert(.command) }
+        if storedModifiers & 2 != 0 { modifiers.insert(.option) }
+        if storedModifiers & 4 != 0 { modifiers.insert(.control) }
+        if storedModifiers & 8 != 0 { modifiers.insert(.shift) }
+        // Read values written by the previous version, which stored NSEvent's raw flags.
+        if modifiers.isEmpty, storedModifiers > 15 {
+            let legacy = NSEvent.ModifierFlags(rawValue: UInt(storedModifiers))
+            if legacy.contains(.command) { modifiers.insert(.command) }
+            if legacy.contains(.option) { modifiers.insert(.option) }
+            if legacy.contains(.control) { modifiers.insert(.control) }
+            if legacy.contains(.shift) { modifiers.insert(.shift) }
+        }
+        guard !modifiers.isEmpty else { return fallback }
+        return Hotkey(keyCode: keyCode, modifiers: modifiers,
+                      name: defaults.string(forKey: prefix + "name") ?? "Key \(keyCode)")
+    }
+
+    func save(to defaults: UserDefaults = .standard, key: String) {
+        let prefix = "hotkey.\(key)."
+        var storedModifiers = 0
+        if modifiers.contains(.command) { storedModifiers |= 1 }
+        if modifiers.contains(.option) { storedModifiers |= 2 }
+        if modifiers.contains(.control) { storedModifiers |= 4 }
+        if modifiers.contains(.shift) { storedModifiers |= 8 }
+        defaults.set(Int(keyCode), forKey: prefix + "keyCode")
+        defaults.set(storedModifiers, forKey: prefix + "modifiers")
+        defaults.set(name, forKey: prefix + "name")
+    }
 }
 
 enum KeyNameFormatter {
