@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Combine
 import CoreGraphics
+import Carbon
 
 final class PressController: ObservableObject {
     @Published var apps: [RunningApp] = []
@@ -20,8 +21,12 @@ final class PressController: ObservableObject {
     }
     @Published var status = "就绪"
     @Published var isRunning = false
-    @Published var startHotkey = Hotkey(keyCode: 49, modifiers: [.command, .option], name: "⌥⌘Space")
-    @Published var stopHotkey = Hotkey(keyCode: 53, modifiers: [.command, .option], name: "⌥⌘Esc")
+    @Published var startHotkey = Hotkey(keyCode: 49, modifiers: [.command, .option], name: "⌥⌘Space") {
+        didSet { registerSystemHotkeys() }
+    }
+    @Published var stopHotkey = Hotkey(keyCode: 53, modifiers: [.command, .option], name: "⌥⌘Esc") {
+        didSet { registerSystemHotkeys() }
+    }
     @Published var recordingHotkey: String?
     @Published var recordingTargetKey = false
     @Published var targetKeyCode = UInt16(UserDefaults.standard.object(forKey: "targetKeyCode") as? Int ?? 0x11) {
@@ -35,8 +40,10 @@ final class PressController: ObservableObject {
     private var timer: DispatchWorkItem?
     private var activePID: pid_t?
     private var observer: NSObjectProtocol?
-    private var globalMonitor: Any?
     private var localMonitor: Any?
+    private var hotKeyHandler: EventHandlerRef?
+    private var startHotKeyRef: EventHotKeyRef?
+    private var stopHotKeyRef: EventHotKeyRef?
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private let eventSource = CGEventSource(stateID: .hidSystemState)
@@ -55,12 +62,15 @@ final class PressController: ObservableObject {
             self.stop(reason: "目标程序已切换到前台，已自动停止")
         }
         installHotkeyMonitor()
+        installSystemHotkeyHandler()
+        registerSystemHotkeys()
     }
 
     deinit {
         if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
-        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        unregisterSystemHotkeys()
+        if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
         stop(reason: nil)
     }
 
@@ -213,15 +223,58 @@ final class PressController: ObservableObject {
     }
 
     private func installHotkeyMonitor() {
-        // Global NSEvent monitors work when the app is in the background. macOS may require
-        // Accessibility permission for global keyboard monitoring.
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleHotkey(event)
-        }
+        // Local monitoring is used only while recording a shortcut or target key.
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleHotkey(event)
             return event
         }
+    }
+
+    private func installSystemHotkeyHandler() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let callback: EventHandlerProcPtr = { _, event, userData in
+            guard let event, let userData else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            let status = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                                           MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
+            guard status == noErr else { return status }
+            let controller = Unmanaged<PressController>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async {
+                switch hotKeyID.id {
+                case 1: controller.start()
+                case 2: controller.stop()
+                default: break
+                }
+            }
+            return noErr
+        }
+        InstallEventHandler(GetApplicationEventTarget(), callback, 1, &eventType,
+                            Unmanaged.passUnretained(self).toOpaque(), &hotKeyHandler)
+    }
+
+    private func registerSystemHotkeys() {
+        unregisterSystemHotkeys()
+        guard hotKeyHandler != nil else { return }
+        let startID = EventHotKeyID(signature: OSType(0x42504B59), id: 1)
+        let stopID = EventHotKeyID(signature: OSType(0x42504B59), id: 2)
+        RegisterEventHotKey(UInt32(startHotkey.keyCode), carbonModifiers(startHotkey.modifiers), startID,
+                            GetApplicationEventTarget(), 0, &startHotKeyRef)
+        RegisterEventHotKey(UInt32(stopHotkey.keyCode), carbonModifiers(stopHotkey.modifiers), stopID,
+                            GetApplicationEventTarget(), 0, &stopHotKeyRef)
+    }
+
+    private func unregisterSystemHotkeys() {
+        if let startHotKeyRef { UnregisterEventHotKey(startHotKeyRef); self.startHotKeyRef = nil }
+        if let stopHotKeyRef { UnregisterEventHotKey(stopHotKeyRef); self.stopHotKeyRef = nil }
+    }
+
+    private func carbonModifiers(_ modifiers: NSEvent.ModifierFlags) -> UInt32 {
+        var result: UInt32 = 0
+        if modifiers.contains(.command) { result |= UInt32(cmdKey) }
+        if modifiers.contains(.option) { result |= UInt32(optionKey) }
+        if modifiers.contains(.control) { result |= UInt32(controlKey) }
+        if modifiers.contains(.shift) { result |= UInt32(shiftKey) }
+        return result
     }
 
     private func handleHotkey(_ event: NSEvent) {
