@@ -10,7 +10,7 @@ struct BackgroundPressApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(controller: controller)
-                .frame(minWidth: 520)
+                .frame(minWidth: 430)
         }
         .windowResizability(.contentSize)
     }
@@ -31,6 +31,12 @@ final class PressController: ObservableObject {
     }
     @Published var maxInterval = UserDefaults.standard.object(forKey: "maxIntervalMs") as? Double ?? 400.0 {
         didSet { UserDefaults.standard.set(maxInterval, forKey: "maxIntervalMs") }
+    }
+    @Published var minimumIntervalText = ""
+    @Published var maximumIntervalText = ""
+    @Published private(set) var intervalValidationMessage: String?
+    @Published private(set) var stopWhenTargetActivates = UserDefaults.standard.object(forKey: "stopWhenTargetActivates") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(stopWhenTargetActivates, forKey: "stopWhenTargetActivates") }
     }
     @Published var status = "就绪"
     @Published var isRunning = false
@@ -56,12 +62,16 @@ final class PressController: ObservableObject {
     private let eventSource = CGEventSource(stateID: .hidSystemState)
 
     init() {
+        minimumIntervalText = NSNumber(value: minInterval).stringValue
+        maximumIntervalText = NSNumber(value: maxInterval).stringValue
+        updateIntervalValidation()
         refreshApps()
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  self.isRunning, app.processIdentifier == self.activePID else { return }
+                  self.isRunning, self.stopWhenTargetActivates,
+                  app.processIdentifier == self.activePID else { return }
             self.stop(reason: "目标程序已切换到前台，已自动停止")
         }
         installHotkeyMonitor()
@@ -98,6 +108,10 @@ final class PressController: ObservableObject {
     }
 
     func start() {
+        guard intervalValidationMessage == nil else {
+            status = intervalValidationMessage ?? "请检查按键间隔"
+            return
+        }
         guard hasAccessibilityPermission else {
             status = "请先授予辅助功能权限"
             return
@@ -108,6 +122,33 @@ final class PressController: ObservableObject {
         isRunning = true
         status = "正在向 PID \(pid) 发送 \(targetKeyName) 键"
         sendDown(pid: pid)
+    }
+
+    func updateMinimumInterval(from text: String) {
+        guard let value = parsePositiveNumber(text) else {
+            minimumIntervalInputIsValid = false
+            updateIntervalValidation()
+            return
+        }
+        minimumIntervalInputIsValid = true
+        minInterval = value
+        updateIntervalValidation()
+    }
+
+    func updateMaximumInterval(from text: String) {
+        guard let value = parsePositiveNumber(text) else {
+            maximumIntervalInputIsValid = false
+            updateIntervalValidation()
+            return
+        }
+        maximumIntervalInputIsValid = true
+        maxInterval = value
+        updateIntervalValidation()
+    }
+
+    func setStopWhenTargetActivates(_ enabled: Bool) {
+        guard !isRunning else { return }
+        stopWhenTargetActivates = enabled
     }
 
     func openAccessibilitySettings() {
@@ -125,6 +166,37 @@ final class PressController: ObservableObject {
         activePID = nil
         isRunning = false
         if let reason { status = reason }
+    }
+
+    private var minimumIntervalInputIsValid = true
+    private var maximumIntervalInputIsValid = true
+
+    private func parsePositiveNumber(_ text: String) -> Double? {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.isLenient = false
+        formatter.usesGroupingSeparator = false
+        guard let number = formatter.number(from: text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        let value = number.doubleValue
+        return value.isFinite && value > 0 ? value : nil
+    }
+
+    private func updateIntervalValidation() {
+        if !minimumIntervalInputIsValid {
+            intervalValidationMessage = "最小间隔必须是大于 0 的数字。"
+        } else if !maximumIntervalInputIsValid {
+            intervalValidationMessage = "最大间隔必须是大于 0 的数字。"
+        } else if !minInterval.isFinite || minInterval <= 0 {
+            intervalValidationMessage = "最小间隔必须是大于 0 的数字。"
+        } else if !maxInterval.isFinite || maxInterval <= 0 {
+            intervalValidationMessage = "最大间隔必须是大于 0 的数字。"
+        } else if minInterval > maxInterval {
+            intervalValidationMessage = "最小间隔不能大于最大间隔。"
+        } else {
+            intervalValidationMessage = nil
+        }
     }
 
     private func scheduleNext(pid: pid_t) {
@@ -239,10 +311,6 @@ struct ContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("后台按键助手").font(.largeTitle.bold())
-                Text("向选中的后台程序发送指定按键").foregroundStyle(.secondary)
-            }
             if !controller.hasAccessibilityPermission {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
@@ -257,7 +325,7 @@ struct ContentView: View {
                 .padding(12)
                 .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
             }
-            GroupBox("目标程序") {
+            GroupBox {
                 HStack(spacing: 10) {
                     Picker("运行中的程序", selection: $controller.selectedPID) {
                         if controller.apps.isEmpty {
@@ -267,8 +335,10 @@ struct ContentView: View {
                     }.labelsHidden().frame(maxWidth: .infinity).disabled(controller.isRunning)
                     Button("刷新") { controller.refreshApps() }
                 }.padding(.vertical, 4)
+            } label: {
+                sectionTitle("目标程序")
             }
-            GroupBox("按下的按键") {
+            GroupBox {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("发送按键")
@@ -286,36 +356,66 @@ struct ContentView: View {
                     }
                 }
                 .padding(.vertical, 4)
+            } label: {
+                sectionTitle("按下的按键")
             }
-            GroupBox("按键间隔") {
+            GroupBox {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("最短")
-                        TextField("200", value: $controller.minInterval, format: .number).frame(width: 76)
+                        Text("最短").font(.system(size: 13, weight: .medium))
+                        TextField("200", text: Binding(
+                            get: { controller.minimumIntervalText },
+                            set: { controller.minimumIntervalText = $0; controller.updateMinimumInterval(from: $0) }
+                        ))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 66)
+                            .disabled(controller.isRunning)
                         Text("ms")
-                        Text("最长").padding(.leading, 12)
-                        TextField("400", value: $controller.maxInterval, format: .number).frame(width: 76)
+                        Text("最长").font(.system(size: 13, weight: .medium)).padding(.leading, 8)
+                        TextField("400", text: Binding(
+                            get: { controller.maximumIntervalText },
+                            set: { controller.maximumIntervalText = $0; controller.updateMaximumInterval(from: $0) }
+                        ))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 66)
+                            .disabled(controller.isRunning)
                         Text("ms")
                     }
                     Text("每次按键间随机选择间隔（至少 30 ms）").font(.caption).foregroundStyle(.secondary)
+                    if let message = controller.intervalValidationMessage {
+                        Text(message).font(.caption).foregroundStyle(.red)
+                    }
                 }.padding(.vertical, 4)
+            } label: {
+                sectionTitle("按键间隔")
             }
-            GroupBox("快捷键") {
+            GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
                     hotkeyRow(title: "开始", item: controller.startHotkey, id: "start")
                     hotkeyRow(title: "停止", item: controller.stopHotkey, id: "stop")
                     if controller.recordingHotkey != nil { Text("请按下组合键…（至少包含 ⌘、⌥、⌃、⇧ 之一）").font(.caption).foregroundStyle(.orange) }
                 }.padding(.vertical, 4)
+            } label: {
+                sectionTitle("快捷键")
+            }
+            GroupBox {
+                Toggle("目标应用切换到前台时自动暂停", isOn: Binding(
+                    get: { controller.stopWhenTargetActivates },
+                    set: { controller.setStopWhenTargetActivates($0) }
+                ))
+                .disabled(controller.isRunning)
+            } label: {
+                sectionTitle("自动暂停")
             }
             HStack {
                 Circle().fill(controller.isRunning ? .green : .gray).frame(width: 9, height: 9)
                 Text(controller.status).font(.callout).lineLimit(1)
                 Spacer()
                 Button("开始") { controller.start() }.keyboardShortcut(.return)
-                    .disabled(controller.isRunning || !controller.hasAccessibilityPermission)
+                    .disabled(controller.isRunning || !controller.hasAccessibilityPermission || controller.intervalValidationMessage != nil)
                 Button("停止") { controller.stop() }.keyboardShortcut(.escape).disabled(!controller.isRunning)
             }
-            Text("应用切换到前台时会自动停止。全局快捷键可能需要在系统设置中授予辅助功能权限。")
+            Text("全局快捷键和后台按键可能需要辅助功能权限。")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(22)
@@ -335,6 +435,10 @@ struct ContentView: View {
             }
         }
         
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text).font(.system(size: 15, weight: .semibold))
     }
 
     @ViewBuilder private func hotkeyRow(title: String, item: Hotkey, id: String) -> some View {
